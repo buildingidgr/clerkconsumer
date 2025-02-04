@@ -70,12 +70,16 @@ class ClerkConsumerService:
     def _extract_profile_data(self, message_data: Dict) -> Dict:
         """Extract and map profile data from the Clerk webhook message."""
         try:
+            # The message has an extra 'data' wrapper
+            event_data = message_data.get('data', {})
+            
             # Validate message type
-            event_type = message_data.get('type')  # Note: type instead of eventType
+            event_type = event_data.get('type')  # type is in the outer data object
             if event_type != 'user.created':
                 raise ValueError(f"Unexpected event type: {event_type}")
 
-            data = message_data.get('data', {})
+            # The actual user data is nested in data.data
+            data = event_data.get('data', {})
             clerk_id = data.get('id')
             
             # Validate Clerk ID before proceeding
@@ -184,10 +188,10 @@ class ClerkConsumerService:
             message = json.loads(body)
             
             # Only process user.created events
-            if message.get('type') != 'user.created':  # Note: type instead of eventType
+            # Note: eventType is in the outer object now
+            if message.get('eventType') != 'user.created':
                 logger.info("skipping_non_user_created_event", 
-                          event_type=message.get('type'),
-                          object_type=message.get('object'))
+                          event_type=message.get('eventType'))
                 ch.basic_ack(delivery_tag=method.delivery_tag)
                 return
 
