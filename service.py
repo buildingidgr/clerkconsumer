@@ -51,23 +51,65 @@ class ClerkConsumerService:
         """Hash an API key for storage."""
         return hashlib.sha256(api_key.encode()).hexdigest()
 
+    def _validate_clerk_id(self, clerk_id: str | None) -> bool:
+        """Validate that the Clerk ID is present and in the correct format."""
+        if not clerk_id:
+            logger.error("clerk_id_missing")
+            return False
+        
+        if not isinstance(clerk_id, str):
+            logger.error("clerk_id_invalid_type", type=type(clerk_id).__name__)
+            return False
+            
+        if not clerk_id.startswith("user_"):
+            logger.error("clerk_id_invalid_format", clerk_id=clerk_id)
+            return False
+            
+        return True
+
     def _extract_profile_data(self, message_data: Dict) -> Dict:
         """Extract and map profile data from the Clerk webhook message."""
-        data = message_data.get('data', {})
-        email_addresses = data.get('email_addresses', [{}])
-        phone_numbers = data.get('phone_numbers', [{}])
-        
-        return {
-            "clerkId": data.get('id'),
-            "email": email_addresses[0].get('email_address') if email_addresses else None,
-            "emailVerified": True,
-            "phoneNumber": phone_numbers[0].get('phone_number') if phone_numbers else None,
-            "phoneVerified": False,
-            "firstName": data.get('first_name'),
-            "lastName": data.get('last_name'),
-            "avatarUrl": data.get('image_url') or data.get('profile_image_url'),
-            "apiKey": self.generate_api_key()
-        }
+        try:
+            data = message_data.get('data', {})
+            clerk_id = data.get('id')
+            
+            # Validate Clerk ID before proceeding
+            if not self._validate_clerk_id(clerk_id):
+                raise ValueError(f"Invalid or missing Clerk ID: {clerk_id}")
+            
+            # Log incoming data structure
+            logger.info("extracting_profile_data", 
+                       event_type=message_data.get('eventType'),
+                       user_id=clerk_id)
+
+            email_addresses = data.get('email_addresses', [{}])
+            phone_numbers = data.get('phone_numbers', [{}])
+            
+            profile_data = {
+                "clerkId": clerk_id,
+                "email": email_addresses[0].get('email_address') if email_addresses else None,
+                "emailVerified": True,
+                "phoneNumber": phone_numbers[0].get('phone_number') if phone_numbers else None,
+                "phoneVerified": False,
+                "firstName": data.get('first_name'),
+                "lastName": data.get('last_name'),
+                "avatarUrl": data.get('image_url') or data.get('profile_image_url'),
+                "apiKey": self.generate_api_key()
+            }
+
+            # Log extracted data (excluding sensitive information)
+            logger.info("profile_data_extracted", 
+                       clerk_id=profile_data['clerkId'],
+                       has_email=bool(profile_data['email']),
+                       has_phone=bool(profile_data['phoneNumber']),
+                       has_name=bool(profile_data['firstName'] or profile_data['lastName']))
+
+            return profile_data
+        except Exception as e:
+            logger.error("profile_data_extraction_failed", 
+                        error=str(e),
+                        data_keys=list(message_data.keys()) if isinstance(message_data, dict) else None)
+            raise
 
     def _forward_to_profile_service(self, profile_data: Dict) -> bool:
         """Forward the profile data to the external profile service."""
