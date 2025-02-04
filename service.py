@@ -1,0 +1,153 @@
+import json
+import os
+import secrets
+import hashlib
+import time
+import structlog
+import pika
+import requests
+from typing import Dict, Optional
+from config import (
+    RABBITMQ_URL,
+    QUEUE_NAME,
+    PROFILE_SERVICE_URL,
+    PROFILE_SERVICE_API_KEY,
+    API_KEY_PREFIX,
+    API_KEY_LENGTH,
+)
+
+logger = structlog.get_logger()
+
+class ClerkConsumerService:
+    def __init__(self):
+        self.connection = None
+        self.channel = None
+        self._stored_api_keys = set()  # In-memory storage for demo; use a database in production
+
+    def generate_api_key(self) -> str:
+        """Generate a cryptographically secure API key."""
+        start_time = time.time()
+        
+        while True:
+            # Generate random bytes and convert to hex
+            random_bytes = secrets.token_bytes(32)
+            api_key = f"{API_KEY_PREFIX}{random_bytes.hex()}"
+            
+            # Ensure uniqueness
+            if api_key not in self._stored_api_keys:
+                # Store hashed version
+                hashed_key = self._hash_api_key(api_key)
+                self._stored_api_keys.add(hashed_key)
+                
+                generation_time = (time.time() - start_time) * 1000
+                logger.info("api_key_generated", generation_time_ms=generation_time)
+                
+                if generation_time > 100:
+                    logger.warning("api_key_generation_slow", generation_time_ms=generation_time)
+                
+                return api_key
+
+    def _hash_api_key(self, api_key: str) -> str:
+        """Hash an API key for storage."""
+        return hashlib.sha256(api_key.encode()).hexdigest()
+
+    def _extract_profile_data(self, message_data: Dict) -> Dict:
+        """Extract and map profile data from the Clerk webhook message."""
+        data = message_data.get('data', {})
+        email_addresses = data.get('email_addresses', [{}])
+        phone_numbers = data.get('phone_numbers', [{}])
+        
+        return {
+            "clerkId": data.get('id'),
+            "email": email_addresses[0].get('email_address') if email_addresses else None,
+            "emailVerified": True,
+            "phoneNumber": phone_numbers[0].get('phone_number') if phone_numbers else None,
+            "phoneVerified": False,
+            "firstName": data.get('first_name'),
+            "lastName": data.get('last_name'),
+            "avatarUrl": data.get('image_url') or data.get('profile_image_url'),
+            "apiKey": self.generate_api_key()
+        }
+
+    def _forward_to_profile_service(self, profile_data: Dict) -> bool:
+        """Forward the profile data to the external profile service."""
+        try:
+            response = requests.post(
+                f"{PROFILE_SERVICE_URL}/api/profiles/me",
+                json=profile_data,
+                headers={
+                    "x-api-key": PROFILE_SERVICE_API_KEY,
+                    "Content-Type": "application/json"
+                },
+                timeout=10
+            )
+            response.raise_for_status()
+            return True
+        except requests.exceptions.RequestException as e:
+            logger.error("profile_service_request_failed", error=str(e))
+            return False
+
+    def _process_message(self, ch, method, properties, body):
+        """Process incoming RabbitMQ messages."""
+        try:
+            message = json.loads(body)
+            
+            # Only process user.created events
+            if message.get('eventType') != 'user.created':
+                logger.info("skipping_non_user_created_event", event_type=message.get('eventType'))
+                ch.basic_ack(delivery_tag=method.delivery_tag)
+                return
+
+            # Extract and process profile data
+            profile_data = self._extract_profile_data(message)
+            
+            # Forward to profile service
+            if self._forward_to_profile_service(profile_data):
+                logger.info("profile_created_successfully", clerk_id=profile_data['clerkId'])
+                ch.basic_ack(delivery_tag=method.delivery_tag)
+            else:
+                # Negative acknowledgment to retry later
+                ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
+                
+        except Exception as e:
+            logger.error("message_processing_failed", error=str(e))
+            ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
+
+    def start(self):
+        """Start consuming messages from RabbitMQ."""
+        try:
+            # Connect to RabbitMQ
+            self.connection = pika.BlockingConnection(pika.URLParameters(RABBITMQ_URL))
+            self.channel = self.connection.channel()
+            
+            # Declare queue
+            self.channel.queue_declare(queue=QUEUE_NAME, durable=True)
+            
+            # Set up consumer
+            self.channel.basic_qos(prefetch_count=1)
+            self.channel.basic_consume(
+                queue=QUEUE_NAME,
+                on_message_callback=self._process_message
+            )
+            
+            logger.info("service_started", queue=QUEUE_NAME)
+            self.channel.start_consuming()
+            
+        except Exception as e:
+            logger.error("service_error", error=str(e))
+            if self.connection and not self.connection.is_closed:
+                self.connection.close()
+            raise
+
+    def stop(self):
+        """Stop the service gracefully."""
+        if self.connection and not self.connection.is_closed:
+            self.connection.close()
+            logger.info("service_stopped")
+
+if __name__ == "__main__":
+    service = ClerkConsumerService()
+    try:
+        service.start()
+    except KeyboardInterrupt:
+        service.stop() 
