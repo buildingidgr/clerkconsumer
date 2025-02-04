@@ -7,6 +7,7 @@ load_dotenv()
 # RabbitMQ Configuration
 RABBITMQ_URL = os.getenv('RABBITMQ_URL', 'amqp://guest:guest@localhost:5672/')
 QUEUE_NAME = 'webhook-events'
+API_KEY_MAPPING_QUEUE = 'api-key-mappings'  # Queue for API key to user ID mappings
 
 # Profile Service Configuration
 def ensure_https_scheme(url: str) -> str:

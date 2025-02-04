@@ -6,10 +6,11 @@ import time
 import structlog
 import pika
 import requests
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 from config import (
     RABBITMQ_URL,
     QUEUE_NAME,
+    API_KEY_MAPPING_QUEUE,
     PROFILE_SERVICE_URL,
     PROFILE_SERVICE_API_KEY,
     API_KEY_PREFIX,
@@ -24,8 +25,8 @@ class ClerkConsumerService:
         self.channel = None
         self._stored_api_keys = set()  # In-memory storage for demo; use a database in production
 
-    def generate_api_key(self) -> str:
-        """Generate a cryptographically secure API key."""
+    def generate_api_key(self) -> Tuple[str, str]:
+        """Generate a cryptographically secure API key and its hash."""
         start_time = time.time()
         
         while True:
@@ -33,10 +34,11 @@ class ClerkConsumerService:
             random_bytes = secrets.token_bytes(32)
             api_key = f"{API_KEY_PREFIX}{random_bytes.hex()}"
             
+            # Generate hash
+            hashed_key = self._hash_api_key(api_key)
+            
             # Ensure uniqueness
-            if api_key not in self._stored_api_keys:
-                # Store hashed version
-                hashed_key = self._hash_api_key(api_key)
+            if hashed_key not in self._stored_api_keys:
                 self._stored_api_keys.add(hashed_key)
                 
                 generation_time = (time.time() - start_time) * 1000
@@ -45,11 +47,48 @@ class ClerkConsumerService:
                 if generation_time > 100:
                     logger.warning("api_key_generation_slow", generation_time_ms=generation_time)
                 
-                return api_key
+                return api_key, hashed_key
 
     def _hash_api_key(self, api_key: str) -> str:
         """Hash an API key for storage."""
         return hashlib.sha256(api_key.encode()).hexdigest()
+
+    def _publish_api_key_mapping(self, hashed_key: str, user_id: str) -> bool:
+        """Publish API key mapping to RabbitMQ for Redis storage."""
+        try:
+            # Ensure the channel is open
+            if not self.channel or self.channel.is_closed:
+                logger.error("channel_closed_cannot_publish_mapping")
+                return False
+
+            # Declare the queue if it doesn't exist
+            self.channel.queue_declare(queue=API_KEY_MAPPING_QUEUE, durable=True)
+            
+            # Create the mapping message
+            mapping = {
+                "key": f"api_key:{hashed_key}",
+                "value": user_id
+            }
+            
+            # Publish the mapping
+            self.channel.basic_publish(
+                exchange='',
+                routing_key=API_KEY_MAPPING_QUEUE,
+                body=json.dumps(mapping),
+                properties=pika.BasicProperties(
+                    delivery_mode=2,  # make message persistent
+                    content_type='application/json'
+                )
+            )
+            
+            logger.info("api_key_mapping_published", 
+                       user_id=user_id,
+                       queue=API_KEY_MAPPING_QUEUE)
+            return True
+            
+        except Exception as e:
+            logger.error("api_key_mapping_publish_failed", error=str(e))
+            return False
 
     def _validate_clerk_id(self, clerk_id: str | None) -> bool:
         """Validate that the Clerk ID is present and in the correct format."""
@@ -123,6 +162,13 @@ class ClerkConsumerService:
                 phone = primary_phone.get('phone_number')
                 phone_verified = primary_phone.get('verification', {}).get('status') == 'verified'
             
+            # Generate API key and its hash
+            api_key, hashed_key = self.generate_api_key()
+            
+            # Publish the API key mapping
+            if not self._publish_api_key_mapping(hashed_key, clerk_id):
+                raise ValueError("Failed to publish API key mapping")
+            
             profile_data = {
                 "clerkId": clerk_id,
                 "email": email,
@@ -132,7 +178,7 @@ class ClerkConsumerService:
                 "firstName": data.get('first_name'),
                 "lastName": data.get('last_name'),
                 "avatarUrl": data.get('image_url') or data.get('profile_image_url'),
-                "apiKey": self.generate_api_key()
+                "apiKey": api_key
             }
 
             # Log extracted data (excluding sensitive information)
