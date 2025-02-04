@@ -267,8 +267,15 @@ class ClerkConsumerService:
             self.connection = pika.BlockingConnection(pika.URLParameters(RABBITMQ_URL))
             self.channel = self.connection.channel()
             
-            # Declare queue
+            # Declare both queues
+            # Main webhook events queue
             self.channel.queue_declare(queue=QUEUE_NAME, durable=True)
+            
+            # API key mapping queue
+            self.channel.queue_declare(queue=API_KEY_MAPPING_QUEUE, durable=True)
+            logger.info("queues_declared", 
+                       webhook_queue=QUEUE_NAME, 
+                       mapping_queue=API_KEY_MAPPING_QUEUE)
             
             # Set up consumer
             self.channel.basic_qos(prefetch_count=1)

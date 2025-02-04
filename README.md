@@ -7,6 +7,7 @@ A service that consumes RabbitMQ messages from Clerk webhooks, generates secure 
 - Consumes Clerk webhook events from RabbitMQ queue
 - Generates cryptographically secure API keys with `mk_` prefix
 - Forwards user profile data to external profile service
+- Publishes API key mappings for Redis storage
 - Secure storage of API keys (hashed)
 - Robust error handling and logging
 
@@ -43,31 +44,37 @@ A service that consumes RabbitMQ messages from Clerk webhooks, generates secure 
 
 ## Railway Deployment
 
-1. Install Railway CLI (optional):
-   ```bash
-   npm i -g @railway/cli
+1. **Prerequisites**
+   - A Railway account
+   - Access to a RabbitMQ instance
+   - Access to Profile Service API
+
+2. **Environment Variables**
+   Set the following in Railway Dashboard:
+   ```
+   RABBITMQ_URL=your_rabbitmq_url
+   PROFILE_SERVICE_URL=your_profile_service_url
+   PROFILE_SERVICE_API_KEY=your_profile_service_api_key
    ```
 
-2. Initialize Railway project:
-   ```bash
-   railway login
-   railway init
-   ```
+3. **Deploy**
+   - Connect your GitHub repository to Railway
+   - Railway will automatically:
+     - Detect Python
+     - Install dependencies from requirements.txt
+     - Start the service using the command in railway.toml
 
-3. Set up environment variables in Railway Dashboard:
-   - Go to your project in Railway Dashboard
-   - Navigate to Variables tab
-   - Add the following variables:
-     - `RABBITMQ_URL`: Your RabbitMQ connection URL
-     - `PROFILE_SERVICE_URL`: Your profile service URL
-     - `PROFILE_SERVICE_API_KEY`: Your profile service API key
+4. **Monitoring**
+   - View logs in Railway Dashboard
+   - Monitor service health
+   - Track environment variables
 
-4. Deploy to Railway:
-   ```bash
-   railway up
-   ```
-   
-   Or connect your GitHub repository to Railway for automatic deployments.
+## Queues
+
+The service creates and uses two durable queues:
+
+1. `webhook-events`: Receives Clerk webhook events
+2. `api-key-mappings`: Publishes API key to user ID mappings for Redis storage
 
 ## Configuration
 
@@ -100,12 +107,23 @@ Generated API keys follow this format:
 - 64-character hex string (32 cryptographically secure random bytes)
 - Example: `mk_0dbf1b1e4c8fabefa85429b5cabec282f2a1dd442dc8c0ab7a134bd77f0c6fb6`
 
+## API Key Redis Mapping
+
+For each generated API key, a mapping is published to RabbitMQ in the format:
+```json
+{
+  "key": "api_key:<hashed_api_key>",
+  "value": "<clerk_user_id>"
+}
+```
+
 ## Error Handling
 
 The service includes comprehensive error handling:
 - Failed profile service requests are logged and messages are requeued
 - API key generation failures are logged
 - Network connectivity issues are handled gracefully
+- Failed API key mapping publications are logged and prevent profile creation
 
 ## Security
 
