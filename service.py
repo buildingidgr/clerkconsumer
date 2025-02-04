@@ -70,6 +70,11 @@ class ClerkConsumerService:
     def _extract_profile_data(self, message_data: Dict) -> Dict:
         """Extract and map profile data from the Clerk webhook message."""
         try:
+            # Validate message type
+            event_type = message_data.get('type')  # Note: type instead of eventType
+            if event_type != 'user.created':
+                raise ValueError(f"Unexpected event type: {event_type}")
+
             data = message_data.get('data', {})
             clerk_id = data.get('id')
             
@@ -79,18 +84,47 @@ class ClerkConsumerService:
             
             # Log incoming data structure
             logger.info("extracting_profile_data", 
-                       event_type=message_data.get('eventType'),
+                       event_type=event_type,
                        user_id=clerk_id)
 
-            email_addresses = data.get('email_addresses', [{}])
-            phone_numbers = data.get('phone_numbers', [{}])
+            # Get primary email if it exists
+            email_addresses = data.get('email_addresses', [])
+            primary_email_id = data.get('primary_email_address_id')
+            
+            email = None
+            email_verified = False
+            if email_addresses:
+                # Try to find primary email first
+                primary_email = next(
+                    (email for email in email_addresses 
+                     if email.get('id') == primary_email_id),
+                    email_addresses[0]  # Fallback to first email if primary not found
+                )
+                email = primary_email.get('email_address')
+                email_verified = primary_email.get('verification', {}).get('status') == 'verified'
+
+            # Get primary phone if it exists
+            phone_numbers = data.get('phone_numbers', [])
+            primary_phone_id = data.get('primary_phone_number_id')
+            
+            phone = None
+            phone_verified = False
+            if phone_numbers:
+                # Try to find primary phone first
+                primary_phone = next(
+                    (phone for phone in phone_numbers 
+                     if phone.get('id') == primary_phone_id),
+                    phone_numbers[0]  # Fallback to first phone if primary not found
+                )
+                phone = primary_phone.get('phone_number')
+                phone_verified = primary_phone.get('verification', {}).get('status') == 'verified'
             
             profile_data = {
                 "clerkId": clerk_id,
-                "email": email_addresses[0].get('email_address') if email_addresses else None,
-                "emailVerified": True,
-                "phoneNumber": phone_numbers[0].get('phone_number') if phone_numbers else None,
-                "phoneVerified": False,
+                "email": email,
+                "emailVerified": email_verified,
+                "phoneNumber": phone,
+                "phoneVerified": phone_verified,
                 "firstName": data.get('first_name'),
                 "lastName": data.get('last_name'),
                 "avatarUrl": data.get('image_url') or data.get('profile_image_url'),
@@ -102,7 +136,9 @@ class ClerkConsumerService:
                        clerk_id=profile_data['clerkId'],
                        has_email=bool(profile_data['email']),
                        has_phone=bool(profile_data['phoneNumber']),
-                       has_name=bool(profile_data['firstName'] or profile_data['lastName']))
+                       has_name=bool(profile_data['firstName'] or profile_data['lastName']),
+                       email_verified=profile_data['emailVerified'],
+                       phone_verified=profile_data['phoneVerified'])
 
             return profile_data
         except Exception as e:
@@ -148,8 +184,10 @@ class ClerkConsumerService:
             message = json.loads(body)
             
             # Only process user.created events
-            if message.get('eventType') != 'user.created':
-                logger.info("skipping_non_user_created_event", event_type=message.get('eventType'))
+            if message.get('type') != 'user.created':  # Note: type instead of eventType
+                logger.info("skipping_non_user_created_event", 
+                          event_type=message.get('type'),
+                          object_type=message.get('object'))
                 ch.basic_ack(delivery_tag=method.delivery_tag)
                 return
 
@@ -158,10 +196,14 @@ class ClerkConsumerService:
             
             # Forward to profile service
             if self._forward_to_profile_service(profile_data):
-                logger.info("profile_created_successfully", clerk_id=profile_data['clerkId'])
+                logger.info("profile_created_successfully", 
+                          clerk_id=profile_data['clerkId'],
+                          email=bool(profile_data['email']),
+                          phone=bool(profile_data['phoneNumber']))
                 ch.basic_ack(delivery_tag=method.delivery_tag)
             else:
                 # Negative acknowledgment to retry later
+                logger.warning("profile_creation_failed", clerk_id=profile_data['clerkId'])
                 ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
                 
         except Exception as e:
