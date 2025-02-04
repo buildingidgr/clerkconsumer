@@ -1,5 +1,6 @@
 import os
 from dotenv import load_dotenv
+from urllib.parse import urlparse, urlunparse
 
 load_dotenv()
 
@@ -8,7 +9,15 @@ RABBITMQ_URL = os.getenv('RABBITMQ_URL', 'amqp://guest:guest@localhost:5672/')
 QUEUE_NAME = 'webhook-events'
 
 # Profile Service Configuration
-PROFILE_SERVICE_URL = os.getenv('PROFILE_SERVICE_URL', 'http://localhost:8000')
+def ensure_https_scheme(url: str) -> str:
+    """Ensure the URL has https:// scheme."""
+    if not url:
+        return url
+    if not url.startswith(('http://', 'https://')):
+        return f'https://{url}'
+    return url
+
+PROFILE_SERVICE_URL = ensure_https_scheme(os.getenv('PROFILE_SERVICE_URL', 'http://localhost:8000'))
 PROFILE_SERVICE_API_KEY = os.getenv('PROFILE_SERVICE_API_KEY')
 
 # API Key Configuration

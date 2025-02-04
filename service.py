@@ -72,8 +72,15 @@ class ClerkConsumerService:
     def _forward_to_profile_service(self, profile_data: Dict) -> bool:
         """Forward the profile data to the external profile service."""
         try:
+            if not PROFILE_SERVICE_URL:
+                logger.error("profile_service_url_missing")
+                return False
+
+            endpoint = f"{PROFILE_SERVICE_URL.rstrip('/')}/api/profiles/me"
+            logger.info("sending_profile_data", endpoint=endpoint)
+
             response = requests.post(
-                f"{PROFILE_SERVICE_URL}/api/profiles/me",
+                endpoint,
                 json=profile_data,
                 headers={
                     "x-api-key": PROFILE_SERVICE_API_KEY,
@@ -84,7 +91,13 @@ class ClerkConsumerService:
             response.raise_for_status()
             return True
         except requests.exceptions.RequestException as e:
-            logger.error("profile_service_request_failed", error=str(e))
+            logger.error("profile_service_request_failed", 
+                        error=str(e),
+                        endpoint=endpoint if 'endpoint' in locals() else None,
+                        status_code=getattr(e.response, 'status_code', None) if hasattr(e, 'response') else None)
+            return False
+        except Exception as e:
+            logger.error("unexpected_error", error=str(e))
             return False
 
     def _process_message(self, ch, method, properties, body):
